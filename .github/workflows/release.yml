@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build and upload binaries
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            suffix: linux-amd64
+          - goos: linux
+            goarch: arm64
+            suffix: linux-arm64
+          - goos: darwin
+            goarch: amd64
+            suffix: darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            suffix: darwin-arm64
+          - goos: windows
+            goarch: amd64
+            suffix: windows-amd64
+            ext: .exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          go build -ldflags="-s -w" -o ctxpack-${{ matrix.suffix }}${{ matrix.ext }} main.go
+
+      - name: SHA256
+        run: |
+          sha256sum ctxpack-${{ matrix.suffix }}${{ matrix.ext }} > ctxpack-${{ matrix.suffix }}${{ matrix.ext }}.sha256
+
+      - name: Upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ctxpack-${{ matrix.suffix }}${{ matrix.ext }}
+            ctxpack-${{ matrix.suffix }}${{ matrix.ext }}.sha256
