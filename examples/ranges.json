@@ -1,0 +1,28 @@
+{
+    "include": [
+        {
+            "path": "my-project/src/services/auth.js",
+            "ranges": [
+                { "start": 1,   "end": 30  }
+            ]
+        },
+        {
+            "path": "my-project/src/services/database.js",
+            "ranges": [
+                { "start": 45,  "end": 90  },
+                { "start": 120, "end": 155 }
+            ]
+        },
+        {
+            "path": "my-project/src/logic/Payment.js",
+            "ranges": [
+                { "start": 10,  "end": 60  },
+                { "start": 200, "end": 250 },
+                { "start": 310, "end": 340 }
+            ]
+        }
+    ],
+    "exclude": [
+        "*.test.js"
+    ]
+}

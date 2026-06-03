@@ -1,0 +1,15 @@
+{
+    "include": [
+        "my-project/src/index.js",
+        "my-project/src/app.js",
+        "my-project/src/routes/users.js",
+        "my-project/src/models/User.js"
+    ],
+    "exclude": [
+        "*.css",
+        "*.scss",
+        "*.md",
+        "*.json",
+        "*.test.js"
+    ]
+}

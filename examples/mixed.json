@@ -1,0 +1,33 @@
+{
+    "include": [
+        "my-project/package.json",
+
+        "my-project/src/index.js",
+
+        {
+            "path": "my-project/src/controllers/UserController.js",
+            "ranges": [
+                { "start": 1,  "end": 20  },
+                { "start": 85, "end": 130 }
+            ]
+        },
+
+        {
+            "path": "my-project/src/services/PaymentService.js",
+            "ranges": [
+                { "start": 50, "end": 100 }
+            ]
+        },
+
+        "my-project/src/middleware/auth.js",
+
+        "my-project/src/config/*.js"
+    ],
+    "exclude": [
+        "*.test.js",
+        "*.spec.js",
+        "*.css",
+        "*.scss",
+        "*.md"
+    ]
+}

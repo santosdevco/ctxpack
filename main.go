@@ -9,17 +9,52 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/atotto/clipboard"
 )
 
-// --- Estructuras para el JSON ---
-type Config struct {
-	Include []string `json:"include"`
-	Exclude []string `json:"exclude"`
+// --- Types ---
+
+type Range struct {
+	Start   int    `json:"start"`
+	End     int    `json:"end"`
+	Context string `json:"context,omitempty"`
 }
 
-// --- Estructuras para el XML ---
+// IncludeTarget acepta string simple o objeto con rangos en el JSON.
+// Ejemplos válidos:
+//   "src/**/*.go"
+//   {"path": "main.go", "ranges": [{"start": 10, "end": 80}]}
+type IncludeTarget struct {
+	Path   string  `json:"path"`
+	Ranges []Range `json:"ranges,omitempty"`
+}
+
+func (t *IncludeTarget) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		t.Path = s
+		return nil
+	}
+	type Alias IncludeTarget
+	var a Alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*t = IncludeTarget(a)
+	return nil
+}
+
+type Config struct {
+	Include []IncludeTarget `json:"include"`
+	Exclude []string        `json:"exclude"`
+}
+
+// --- XML structures ---
+
 type XMLFile struct {
 	Path    string `xml:"path,attr"`
 	Content string `xml:",cdata"`
@@ -39,38 +74,148 @@ type XMLCodebase struct {
 	Files         []XMLFile   `xml:"file"`
 }
 
+// --- Default ignores ---
+
+var defaultIgnoreDirs = map[string]bool{
+	"node_modules": true,
+	".git":         true,
+	"dist":         true,
+	"build":        true,
+	"__pycache__":  true,
+	".next":        true,
+	"coverage":     true,
+	"vendor":       true,
+}
+
+// dangerousPatterns: archivos que nunca deben incluirse en el output.
+var dangerousPatterns = []string{
+	".env", ".env.local", ".env.production", ".env.staging", ".env.development",
+	"*.pem", "*.key", "*.p12", "*.pfx", "*.crt",
+	"id_rsa", "id_ed25519", "id_dsa", "id_ecdsa",
+	"credentials.json", "secrets.json", "serviceAccountKey.json",
+	".netrc", ".npmrc",
+}
+
+// --- Secret masking ---
+
+var secretRegexes = []*regexp.Regexp{
+	// key=value o key: value (API keys, tokens, passwords, etc.)
+	regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|passwd|pwd|auth|bearer|credential)\s*[=:]\s*\S+`),
+	// Tokens de proveedores conocidos (GitHub, OpenAI, AWS)
+	regexp.MustCompile(`(ghp_|gho_|ghs_|sk-|AKIA)[A-Za-z0-9_/+=]{10,}`),
+	// URLs con credenciales embebidas
+	regexp.MustCompile(`https?://[^:\s]+:[^@\s]+@\S+`),
+}
+
+func maskSecrets(line string) string {
+	result := line
+	for _, re := range secretRegexes {
+		result = re.ReplaceAllStringFunc(result, func(match string) string {
+			eqIdx := strings.IndexAny(match, "=:")
+			if eqIdx > 0 {
+				return match[:eqIdx+1] + " [MASKED]"
+			}
+			return "[MASKED]"
+		})
+	}
+	return result
+}
+
+// --- .gitignore support ---
+
+func loadGitignorePatterns(baseDir string) []string {
+	file, err := os.Open(filepath.Join(baseDir, ".gitignore"))
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+
+	var patterns []string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "!") {
+			continue
+		}
+		patterns = append(patterns, strings.TrimSuffix(line, "/"))
+	}
+	return patterns
+}
+
+// --- Dangerous file check ---
+
+func isDangerous(filename string) bool {
+	for _, pattern := range dangerousPatterns {
+		if matched, _ := filepath.Match(pattern, filename); matched {
+			return true
+		}
+		if filename == pattern {
+			return true
+		}
+	}
+	return false
+}
+
+// --- Main ---
+
 func main() {
-	// Flags de configuración
-	configFile := flag.String("config", "config.json", "Ruta al archivo JSON de configuración")
-	outputFile := flag.String("out", "context.xml", "Ruta del archivo XML de salida")
-	baseDir := flag.String("base", ".", "Directorio base de los proyectos")
+	configFile := flag.String("config", "", "Archivo JSON de configuración (opcional si se usa --path)")
+	pathFlag := flag.String("path", "", "Directorio a empaquetar directamente, sin config JSON")
+	outputFile := flag.String("out", "context.xml", "Archivo de salida")
+	baseDir := flag.String("base", ".", "Directorio base para rutas relativas")
 	addLines := flag.Bool("lines", true, "Agregar números de línea al código")
 	stripEmpty := flag.Bool("strip-empty", true, "Eliminar líneas vacías para ahorrar tokens")
+	doMask := flag.Bool("mask-secrets", false, "Enmascarar secretos detectados con [MASKED]")
+	respectGitignore := flag.Bool("respect-gitignore", true, "Respetar patrones del .gitignore")
+	noDefaultIgnore := flag.Bool("no-default-ignore", false, "Desactivar filtros automáticos (node_modules, .git, dist...)")
+	format := flag.String("format", "xml", "Formato de salida: xml o md")
+	copyPrompt := flag.Bool("copy-prompt", false, "Print the AI chat context message and copy it to clipboard")
 
 	flag.Parse()
 
-	// 1. Leer JSON de configuración
-	jsonFile, err := os.ReadFile(*configFile)
-	if err != nil {
-		log.Fatalf("Error leyendo JSON: %v", err)
+	// Si se usa --path, ese directorio pasa a ser la base
+	if *pathFlag != "" && *baseDir == "." {
+		*baseDir = *pathFlag
+	}
+
+	var gitignorePatterns []string
+	if *respectGitignore {
+		gitignorePatterns = loadGitignorePatterns(*baseDir)
 	}
 
 	var config Config
-	if err := json.Unmarshal(jsonFile, &config); err != nil {
-		log.Fatalf("Error parseando JSON: %v", err)
+
+	if *pathFlag != "" {
+		config.Include = []IncludeTarget{{Path: "."}}
+	} else {
+		cfgPath := *configFile
+		if cfgPath == "" {
+			cfgPath = "config.json"
+		}
+		data, err := os.ReadFile(cfgPath)
+		if err != nil {
+			log.Fatalf("Error leyendo config: %v\n  Usa --path <dir> para empaquetar sin config JSON.", err)
+		}
+		if err := json.Unmarshal(data, &config); err != nil {
+			log.Fatalf("Error parseando config: %v", err)
+		}
 	}
 
 	var codebase XMLCodebase
 	processedFiles := make(map[string]bool)
 
-	// 2. Procesar inclusiones y exclusiones
-	for _, incPattern := range config.Include {
-		searchPattern := filepath.Join(*baseDir, incPattern)
+	for _, target := range config.Include {
+		searchPattern := filepath.Join(*baseDir, target.Path)
 		matches, err := filepath.Glob(searchPattern)
-
 		if err != nil {
 			log.Printf("Advertencia: Patrón inválido '%s': %v\n", searchPattern, err)
 			continue
+		}
+		// Glob no matchea paths literales que no existen como patrón; fallback directo
+		if len(matches) == 0 {
+			if _, err := os.Stat(searchPattern); err == nil {
+				matches = []string{searchPattern}
+			}
 		}
 
 		for _, match := range matches {
@@ -79,46 +224,38 @@ func main() {
 				continue
 			}
 
-			// Si es un directorio, buscar recursivamente
 			if fileInfo.IsDir() {
 				filepath.WalkDir(match, func(path string, d os.DirEntry, err error) error {
 					if err != nil {
 						return nil
 					}
-
-					// Filtro duro: Ignorar carpetas basura masivas automáticamente
 					if d.IsDir() {
-						name := d.Name()
-						if name == "node_modules" || name == ".git" || name == "dist" || name == "build" || name == "__pycache__" || name == ".next" || name == "coverage" {
+						if !*noDefaultIgnore && defaultIgnoreDirs[d.Name()] {
 							return filepath.SkipDir
 						}
 						return nil
 					}
-
-					// Archivos procesados o excluidos por el JSON
-					if processedFiles[path] || isExcluded(path, *baseDir, config.Exclude) {
+					if processedFiles[path] || isExcluded(path, *baseDir, config.Exclude, gitignorePatterns) {
 						return nil
 					}
-
-					addFile(path, *baseDir, &codebase, processedFiles, *addLines, *stripEmpty)
+					addFile(path, *baseDir, &codebase, processedFiles, *addLines, *stripEmpty, nil, *doMask)
 					return nil
 				})
 				continue
 			}
 
-			// Si es un archivo normal (y no ha sido procesado ni excluido)
-			if !processedFiles[match] && !isExcluded(match, *baseDir, config.Exclude) {
-				addFile(match, *baseDir, &codebase, processedFiles, *addLines, *stripEmpty)
+			if !processedFiles[match] && !isExcluded(match, *baseDir, config.Exclude, gitignorePatterns) {
+				addFile(match, *baseDir, &codebase, processedFiles, *addLines, *stripEmpty, target.Ranges, *doMask)
 			}
 		}
 	}
 
-	// 3. Generar el Árbol de Directorios (Solo de lo procesado)
+	// Árbol de directorios
 	var paths []string
 	for _, f := range codebase.Files {
 		paths = append(paths, f.Path)
 	}
-	sort.Strings(paths) // Orden alfabético para que sea fácil de leer por la IA
+	sort.Strings(paths)
 
 	var treeBuilder strings.Builder
 	treeBuilder.WriteString("\n")
@@ -127,60 +264,127 @@ func main() {
 	}
 	codebase.DirectoryTree = treeBuilder.String()
 
-	// 4. Inyectar Metadatos e Instrucciones (Estilo Repomix)
+	// Metadata
+	notes := "Empty lines removed to save tokens."
+	if !*noDefaultIgnore {
+		notes += " Auto-ignored: node_modules, .git, dist, build, vendor."
+	}
+	if *doMask {
+		notes += " Detected secrets masked with [MASKED]."
+	}
+	if len(gitignorePatterns) > 0 {
+		notes += fmt.Sprintf(" Applied %d .gitignore patterns.", len(gitignorePatterns))
+	}
+
 	codebase.Summary = FileSummary{
-		Purpose:    "Este archivo contiene una representación empaquetada de componentes específicos del repositorio. Diseñado para ser consumido por IA para revisión de código, refactorización y auditoría de seguridad.",
-		FileFormat: "1. Este resumen (file_summary)\n2. Estructura de archivos incluidos (directory_structure)\n3. Archivos fuente encapsulados en CDATA.",
-		Usage:      "Lee este archivo como solo-lectura. Indica los cambios referenciando la ruta exacta y los números de línea. Evita reescribir archivos masivos enteros; proporciona solo los bloques modificados si es posible.",
-		Notes:      "Las líneas completamente vacías fueron removidas para optimizar tokens, pero la numeración original se mantiene exacta para referencias precisas. Filtros automáticos descartaron node_modules, .git y compilados.",
+		Purpose:    "Packed repository snapshot for AI consumption: code review, surgical refactoring, and security auditing.",
+		FileFormat: "1. file_summary  2. directory_structure  3. Source files wrapped in CDATA.",
+		Usage:      "Read-only. Reference changes by exact file path and line number. Line number gaps indicate surgical range extraction.",
+		Notes:      notes,
 	}
 
-	// 5. Generar XML final
-	xmlData, err := xml.MarshalIndent(codebase, "", "  ")
-	if err != nil {
-		log.Fatalf("Error generando XML: %v", err)
+	// Generar output según formato
+	switch *format {
+	case "md":
+		content := renderMarkdown(codebase)
+		if err := os.WriteFile(*outputFile, []byte(content), 0644); err != nil {
+			log.Fatalf("Error guardando salida: %v", err)
+		}
+	default:
+		xmlData, err := xml.MarshalIndent(codebase, "", "  ")
+		if err != nil {
+			log.Fatalf("Error generando XML: %v", err)
+		}
+		if err := os.WriteFile(*outputFile, []byte(xml.Header+string(xmlData)), 0644); err != nil {
+			log.Fatalf("Error guardando salida: %v", err)
+		}
 	}
 
-	finalXML := []byte(xml.Header + string(xmlData))
-	if err := os.WriteFile(*outputFile, finalXML, 0644); err != nil {
-		log.Fatalf("Error guardando salida: %v", err)
-	}
+	fmt.Printf("Packed successfully. Files: %d → %s\n", len(codebase.Files), *outputFile)
 
-	fmt.Printf("¡Empaquetado exitoso! Archivos procesados: %d. Contexto guardado en: %s\n", len(codebase.Files), *outputFile)
+	if *copyPrompt {
+		outName := filepath.Base(*outputFile)
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("@%s contains the verbatim source code of these files, with exact line numbers:\n", outName))
+		for _, p := range paths {
+			sb.WriteString(fmt.Sprintf("  - %s\n", p))
+		}
+		sb.WriteString("\nThe XML is identical to what is on disk — use it as your working source, not as a reference.\nDo not use file reading tools. Everything you need is already inside the XML.\nFor any change, cite the exact file path and line number from the XML.\n")
+		msg := sb.String()
+		fmt.Printf("\n--- copy this to the start of your AI chat ---\n%s----------------------------------------------\n", msg)
+		if err := clipboard.WriteAll(msg); err != nil {
+			fmt.Printf("(clipboard unavailable: %v)\n", err)
+		} else {
+			fmt.Println("(copied to clipboard)")
+		}
+	}
 }
 
-// Función auxiliar para agregar archivos
-func addFile(filePath, baseDir string, codebase *XMLCodebase, processedFiles map[string]bool, addLines, stripEmpty bool) {
-	content, err := processFile(filePath, addLines, stripEmpty)
+// --- Helpers ---
+
+func isBinaryFile(filePath string) bool {
+	file, err := os.Open(filePath)
 	if err != nil {
-		log.Printf("Error leyendo %s: %v\n", filePath, err)
-		return
+		return false
 	}
-
-	relPath, _ := filepath.Rel(baseDir, filePath)
-	codebase.Files = append(codebase.Files, XMLFile{
-		Path:    relPath,
-		Content: content,
-	})
-	processedFiles[filePath] = true
-}
-
-// Verifica exclusiones personalizadas del config.json
-func isExcluded(filePath, baseDir string, excludes []string) bool {
-	for _, excPattern := range excludes {
-		excSearch := filepath.Join(baseDir, excPattern)
-		matched, _ := filepath.Match(excSearch, filePath)
-		baseMatched, _ := filepath.Match(excPattern, filepath.Base(filePath))
-
-		if matched || baseMatched {
+	defer file.Close()
+	buf := make([]byte, 512)
+	n, _ := file.Read(buf)
+	for _, b := range buf[:n] {
+		if b == 0 {
 			return true
 		}
 	}
 	return false
 }
 
-// Procesa el archivo, limpia líneas vacías y añade numeración
-func processFile(filePath string, addLines bool, stripEmpty bool) (string, error) {
+func addFile(filePath, baseDir string, codebase *XMLCodebase, processedFiles map[string]bool, addLines, stripEmpty bool, ranges []Range, doMask bool) {
+	if isBinaryFile(filePath) {
+		return
+	}
+	content, err := processFile(filePath, addLines, stripEmpty, ranges, doMask)
+	if err != nil {
+		log.Printf("Error leyendo %s: %v\n", filePath, err)
+		return
+	}
+	relPath, _ := filepath.Rel(baseDir, filePath)
+	codebase.Files = append(codebase.Files, XMLFile{Path: filepath.ToSlash(relPath), Content: content})
+	processedFiles[filePath] = true
+}
+
+func isExcluded(filePath, baseDir string, excludes []string, gitignorePatterns []string) bool {
+	baseName := filepath.Base(filePath)
+	relPath, _ := filepath.Rel(baseDir, filePath)
+
+	// Archivos peligrosos: siempre excluidos
+	if isDangerous(baseName) {
+		return true
+	}
+
+	// Exclusiones del config JSON
+	for _, excPattern := range excludes {
+		if matched, _ := filepath.Match(filepath.Join(baseDir, excPattern), filePath); matched {
+			return true
+		}
+		if matched, _ := filepath.Match(excPattern, baseName); matched {
+			return true
+		}
+	}
+
+	// Patrones de .gitignore
+	for _, pattern := range gitignorePatterns {
+		if matched, _ := filepath.Match(pattern, baseName); matched {
+			return true
+		}
+		if matched, _ := filepath.Match(pattern, relPath); matched {
+			return true
+		}
+	}
+
+	return false
+}
+
+func processFile(filePath string, addLines bool, stripEmpty bool, ranges []Range, doMask bool) (string, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return "", err
@@ -189,7 +393,10 @@ func processFile(filePath string, addLines bool, stripEmpty bool) (string, error
 
 	var builder strings.Builder
 	scanner := bufio.NewScanner(file)
+	// Buffer generoso para archivos con líneas muy largas (ej. minificados)
+	scanner.Buffer(make([]byte, 512*1024), 512*1024)
 	lineNum := 1
+	hasRanges := len(ranges) > 0
 
 	builder.WriteString("\n")
 
@@ -199,6 +406,24 @@ func processFile(filePath string, addLines bool, stripEmpty bool) (string, error
 		if stripEmpty && strings.TrimSpace(line) == "" {
 			lineNum++
 			continue
+		}
+
+		if hasRanges {
+			inRange := false
+			for _, r := range ranges {
+				if lineNum >= r.Start && lineNum <= r.End {
+					inRange = true
+					break
+				}
+			}
+			if !inRange {
+				lineNum++
+				continue
+			}
+		}
+
+		if doMask {
+			line = maskSecrets(line)
 		}
 
 		if addLines {
@@ -214,4 +439,37 @@ func processFile(filePath string, addLines bool, stripEmpty bool) (string, error
 	}
 
 	return builder.String(), nil
+}
+
+func renderMarkdown(codebase XMLCodebase) string {
+	var sb strings.Builder
+	sb.WriteString("# Code Context\n\n")
+	sb.WriteString("## Directory Structure\n\n```\n")
+	sb.WriteString(codebase.DirectoryTree)
+	sb.WriteString("```\n\n")
+
+	for _, f := range codebase.Files {
+		lang := extToLang(filepath.Ext(f.Path))
+		sb.WriteString(fmt.Sprintf("## %s\n\n```%s\n", f.Path, lang))
+		sb.WriteString(f.Content)
+		sb.WriteString("```\n\n")
+	}
+	return sb.String()
+}
+
+func extToLang(ext string) string {
+	langs := map[string]string{
+		".go": "go", ".js": "javascript", ".ts": "typescript", ".tsx": "typescript",
+		".jsx": "javascript", ".py": "python", ".rs": "rust", ".java": "java",
+		".c": "c", ".cpp": "cpp", ".h": "c", ".cs": "csharp",
+		".css": "css", ".scss": "scss", ".html": "html", ".json": "json",
+		".yaml": "yaml", ".yml": "yaml", ".md": "markdown", ".sh": "bash",
+		".sql": "sql", ".rb": "ruby", ".php": "php", ".swift": "swift",
+		".kt": "kotlin", ".vue": "vue", ".svelte": "svelte", ".lua": "lua",
+		".toml": "toml", ".xml": "xml", ".tf": "hcl",
+	}
+	if lang, ok := langs[strings.ToLower(ext)]; ok {
+		return lang
+	}
+	return ""
 }

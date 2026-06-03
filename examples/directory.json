@@ -1,0 +1,15 @@
+{
+    "include": [
+        "my-project/src",
+        "my-project/lib"
+    ],
+    "exclude": [
+        "*.test.js",
+        "*.spec.js",
+        "*.css",
+        "*.scss",
+        "*.md",
+        "*.lock",
+        "*.log"
+    ]
+}
