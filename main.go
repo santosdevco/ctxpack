@@ -215,6 +215,8 @@ func main() {
 		if len(matches) == 0 {
 			if _, err := os.Stat(searchPattern); err == nil {
 				matches = []string{searchPattern}
+			} else {
+				log.Printf("Warning: '%s' not found (from include config)\n", target.Path)
 			}
 		}
 
