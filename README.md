@@ -36,7 +36,7 @@ The AI reads one file instead of many. Line numbers stay accurate, so it can pro
 
 ## Installation
 
-Download the binary for your platform from the [latest release](https://github.com/yourusername/ctxpack/releases/latest), make it executable, and move it to a directory in your `PATH`.
+Download the binary for your platform from the [latest release](https://github.com/santosdevco/ctxpack/releases/latest), make it executable, and move it to a directory in your `PATH`.
 
 | Platform | File |
 |---|---|
