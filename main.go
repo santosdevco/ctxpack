@@ -26,8 +26,9 @@ type Range struct {
 
 // IncludeTarget acepta string simple o objeto con rangos en el JSON.
 // Ejemplos válidos:
-//   "src/**/*.go"
-//   {"path": "main.go", "ranges": [{"start": 10, "end": 80}]}
+//
+//	"src/**/*.go"
+//	{"path": "main.go", "ranges": [{"start": 10, "end": 80}]}
 type IncludeTarget struct {
 	Path   string  `json:"path"`
 	Ranges []Range `json:"ranges,omitempty"`
@@ -170,6 +171,7 @@ func main() {
 	noDefaultIgnore := flag.Bool("no-default-ignore", false, "Desactivar filtros automáticos (node_modules, .git, dist...)")
 	format := flag.String("format", "xml", "Formato de salida: xml o md")
 	copyPrompt := flag.Bool("copy-prompt", false, "Print the AI chat context message and copy it to clipboard")
+	strategy := flag.String("strategy", "first-line", "Estrategia para el prompt: 'first-line' o 'range'")
 
 	flag.Parse()
 
@@ -311,7 +313,15 @@ func main() {
 		for _, p := range paths {
 			sb.WriteString(fmt.Sprintf("  - %s\n", p))
 		}
+		var strategyMsg string
+		switch *strategy {
+		case "range":
+			strategyMsg = "Read the range lines you are going to modify before applying changes to enable the write tool(satisfy read precondition) .\n"
+		default:
+			strategyMsg = "Read only the first line of each file to enable write tool(satisfy read precondition) .\n"
+		}
 		sb.WriteString("\nThe XML is identical to what is on disk — use it as your working source, not as a reference.\nDo not use file reading tools. Everything you need is already inside the XML.\nFor any change, cite the exact file path and line number from the XML.\n")
+		sb.WriteString(strategyMsg)
 		msg := sb.String()
 		fmt.Printf("\n--- copy this to the start of your AI chat ---\n%s----------------------------------------------\n", msg)
 		if err := clipboard.WriteAll(msg); err != nil {
