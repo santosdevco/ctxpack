@@ -92,6 +92,7 @@ The config file controls exactly which files (or line ranges) are included.
 | `--respect-gitignore` | `true` | Apply `.gitignore` patterns automatically |
 | `--no-default-ignore` | `false` | Disable hardcoded ignores (`node_modules`, `.git`, etc.) |
 | `--copy-prompt` | `false` | Print and copy to clipboard the AI chat intro message |
+| `--strategy` | `first-line` | Instruction strategy appended to the `--copy-prompt` message: `first-line` or `range` |
 
 ---
 
@@ -209,6 +210,25 @@ For any change, cite the exact file path and line number from the XML.
 ```
 
 Paste this at the start of your AI chat before any request. The agent will use the XML as its working source instead of trying to read files on its own.
+
+### Controlling the read strategy with `--strategy`
+
+Most AI coding agents require having read a file before they are allowed to write to it (the *read precondition*). The `--strategy` flag appends a one-line instruction to the prompt that tells the agent how to satisfy that precondition efficiently, avoiding unnecessary full-file reads.
+
+| Value | Instruction appended | When to use |
+|---|---|---|
+| `first-line` *(default)* | *"Read only the first line of each file to enable write tool (satisfy read precondition)."* | You are providing the full file content in the XML. The agent only needs to touch each file once (the first line) to unlock write access — no extra tokens wasted reading content it already has. |
+| `range` | *"Read the range lines you are going to modify before applying changes to enable the write tool (satisfy read precondition)."* | You packed surgical line ranges. The agent should re-read only the specific lines it intends to change, keeping the read minimal and precise. |
+
+```bash
+# Full files — agent reads line 1 of each file to unlock writes
+ctxpack --path ./src --copy-prompt --strategy first-line
+
+# Surgical ranges — agent re-reads only the lines it will modify
+ctxpack --config include.json --base .. --copy-prompt --strategy range
+```
+
+If an unrecognised value is passed, `first-line` is used as a fallback.
 
 **Clipboard support** is handled automatically on macOS and Windows. On Linux, install any one of: `xclip`, `xsel`, or `wl-copy` (Wayland).
 
